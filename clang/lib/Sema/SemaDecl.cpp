@@ -1900,12 +1900,6 @@ bool Sema::mightHaveNonExternalLinkage(const DeclaratorDecl *D) {
   return !D->isExternallyVisible();
 }
 
-bool Sema::isMainFileLoc(SourceLocation Loc) const {
-  if (TUKind != TU_Complete || getLangOpts().IsHeaderFile)
-    return false;
-  return SourceMgr.isInMainFile(Loc);
-}
-
 bool Sema::ShouldWarnIfUnusedFileScopedDecl(const DeclaratorDecl *D) const {
   assert(D);
 
@@ -2291,12 +2285,11 @@ void Sema::ActOnPopScope(SourceLocation Loc, Scope *S) {
       DiagnoseUnusedDecl(D, addDiag);
       if (const auto *RD = dyn_cast<RecordDecl>(D))
         DiagnoseUnusedNestedTypedefs(RD, addDiag);
-      if (VarDecl *VD = dyn_cast<VarDecl>(D)) {
-        // Wait until end of TU to diagnose internal linkage file vars.
-        if (!VD->isInternalLinkageFileVar()) {
-          DiagnoseUnusedButSetDecl(VD, addDiag);
-          RefsMinusAssignments.erase(VD);
-        }
+      // Wait until end of TU to diagnose internal linkage file vars.
+      if (auto *VD = dyn_cast<VarDecl>(D);
+          VD && !VD->isInternalLinkageFileVar()) {
+        DiagnoseUnusedButSetDecl(VD, addDiag);
+        RefsMinusAssignments.erase(VD);
       }
     }
 
