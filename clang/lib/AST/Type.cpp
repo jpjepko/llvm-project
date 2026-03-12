@@ -4027,11 +4027,15 @@ void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID,
           getExtProtoInfo(), Ctx, isCanonicalUnqualified());
 }
 
-TypeCoupledDeclRefInfo::TypeCoupledDeclRefInfo(ValueDecl *D, bool Deref)
-    : Data(D, Deref << DerefShift) {}
+TypeCoupledDeclRefInfo::TypeCoupledDeclRefInfo(ValueDecl *D, bool Deref,
+                                               bool Member)
+    : Data(D, (Deref << DerefShift) | (Member << MemberShift)) {}
 
 bool TypeCoupledDeclRefInfo::isDeref() const {
-  return Data.getInt() & DerefMask;
+  return (Data.getInt() >> DerefShift) & DerefMask;
+}
+bool TypeCoupledDeclRefInfo::isMember() const {
+  return (Data.getInt() >> MemberShift) & MemberMask;
 }
 ValueDecl *TypeCoupledDeclRefInfo::getDecl() const { return Data.getPointer(); }
 unsigned TypeCoupledDeclRefInfo::getInt() const { return Data.getInt(); }

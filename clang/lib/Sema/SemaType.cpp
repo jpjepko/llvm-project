@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "TreeTransform.h"
 #include "TypeLocBuilder.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
@@ -47,6 +48,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include <bitset>
 #include <optional>
 
@@ -9952,13 +9954,277 @@ QualType Sema::BuildTypeofExprType(Expr *E, TypeOfKind Kind) {
   return Context.getTypeOfExprType(E, Kind);
 }
 
-static void
-BuildTypeCoupledDecls(Expr *E,
-                      llvm::SmallVectorImpl<TypeCoupledDeclRefInfo> &Decls) {
-  // Currently, 'counted_by' only allows direct DeclRefExpr to FieldDecl.
-  auto *CountDecl = cast<DeclRefExpr>(E)->getDecl();
-  Decls.push_back(TypeCoupledDeclRefInfo(CountDecl, /*IsDref*/ false));
+namespace {
+
+Expr *UnwrapDerefAddrOfPairs(Expr *E) {
+  UnaryOperator *UO = dyn_cast<UnaryOperator>(E);
+  if (!UO)
+    return E;
+  switch (UO->getOpcode()) {
+  case UO_Deref:
+    UO = dyn_cast<UnaryOperator>(UO->getSubExpr()->IgnoreParens());
+    if (!UO || UO->getOpcode() != UO_AddrOf)
+      return E;
+    break;
+  case UO_AddrOf:
+    UO = dyn_cast<UnaryOperator>(UO->getSubExpr()->IgnoreParens());
+    if (!UO || UO->getOpcode() != UO_Deref)
+      return E;
+    break;
+  default:
+    return E;
+  }
+  /// XXX: This way we are leaving out '*((int *)&ch)'.
+  return UnwrapDerefAddrOfPairs(UO->getSubExpr()->IgnoreParens());
 }
+
+/// CountArgChecker - performs sanity checks for an argument in
+/// '__counted_by()' or '__sized_by()', and returns a constant-folded
+/// count expression if feasible.
+class CountArgChecker : public TreeTransform<CountArgChecker> {
+  using BaseTransform = TreeTransform<CountArgChecker>;
+  using DeclList = llvm::SmallVector<TypeCoupledDeclRefInfo, 1>;
+  using DeclSet = llvm::SmallPtrSet<Decl *, 1>;
+  DeclList &Dependees;
+  bool CountInBytes : 1;
+  bool OrNull : 1;
+  bool ScopeCheck : 1;
+  bool IsArray : 1;
+  DeclSet Visited;
+  bool InDeref = false;
+  BinaryOperator *VisitedBinOp = nullptr;
+
+private:
+  ExprResult Fallback(Expr *E) {
+    if (auto CF = ConstantFoldOrNull(E))
+      return CF;
+    SemaRef.Diag(
+        E->getExprLoc(),
+        diag::
+            err_attribute_invalid_argument_expression_for_pointer_bounds_attribute);
+    return ExprError();
+  }
+
+  IntegerLiteral *ConstantFoldOrNull(Expr *E) {
+    if (E->isValueDependent())
+      return nullptr;
+
+    Expr::EvalResult Eval;
+    /// EvaluateAsInt is enough because nodes are visited in-order and
+    /// we require the final results be integer. Hence, cases like
+    /// '(int)(float)f' should work.
+    if (E->EvaluateAsInt(Eval, SemaRef.Context))
+      return IntegerLiteral::Create(SemaRef.Context, Eval.Val.getInt(),
+                                    E->getType(), E->getExprLoc());
+    return nullptr;
+  }
+
+  CountAttributedType::DynamicCountPointerKind getDynamicCountKind() {
+    return CountInBytes ? (OrNull ? CountAttributedType::SizedByOrNull
+                                  : CountAttributedType::SizedBy)
+                        : (OrNull ? CountAttributedType::CountedByOrNull
+                                  : CountAttributedType::CountedBy);
+  }
+
+public:
+  explicit CountArgChecker(Sema &S, DeclList &DList, bool CountInBytes,
+                           bool OrNull, bool ScopeCheck, bool IsArray)
+      : BaseTransform(S), Dependees(DList), CountInBytes(CountInBytes),
+        OrNull(OrNull), ScopeCheck(ScopeCheck), IsArray(IsArray) {}
+
+  ExprResult TransformExpr(Expr *E) {
+    switch (E->getStmtClass()) {
+
+#define TRANSFORM_EXPR(Node)                                                   \
+  case Stmt::Node##Class:                                                      \
+    return Transform##Node(cast<Node>(E));
+
+#define FORWARD_EXPR(Node)                                                     \
+  case Stmt::Node##Class:                                                      \
+    return E;
+
+      TRANSFORM_EXPR(CallExpr)
+      TRANSFORM_EXPR(ImplicitCastExpr)
+      TRANSFORM_EXPR(CStyleCastExpr)
+      TRANSFORM_EXPR(ParenExpr)
+      TRANSFORM_EXPR(BinaryOperator)
+      TRANSFORM_EXPR(UnaryOperator)
+      TRANSFORM_EXPR(DeclRefExpr)
+      TRANSFORM_EXPR(MemberExpr)
+      FORWARD_EXPR(IntegerLiteral)
+      FORWARD_EXPR(FloatingLiteral)
+      FORWARD_EXPR(FixedPointLiteral)
+
+#undef TRANSFORM_EXPR
+#undef FORWARD_EXPR
+    default:
+      break;
+    }
+    return Fallback(E);
+  }
+
+  ExprResult TransformCallExpr(CallExpr *E) {
+    const auto *Callee = E->getDirectCallee();
+    if (Callee && Callee->hasAttr<ConstAttr>()) {
+      for (auto *Arg : E->arguments()) {
+        if (!Arg->isEvaluatable(SemaRef.Context)) {
+          SemaRef.Diag(
+              E->getExprLoc(),
+              diag::err_bounds_safety_dynamic_count_function_call_argument)
+              << E << getDynamicCountKind();
+          return ExprError();
+        }
+      }
+      return E;
+    }
+    SemaRef.Diag(E->getExprLoc(),
+                 diag::err_bounds_safety_dynamic_count_function_call)
+        << getDynamicCountKind();
+    if (Callee) {
+      SemaRef.Diag(Callee->getLocation(), diag::note_callee_decl) << Callee;
+    }
+    return ExprError();
+  }
+
+  ExprResult TransformImplicitCastExpr(ImplicitCastExpr *E) {
+    return BaseTransform::TransformImplicitCastExpr(E);
+  }
+
+  ExprResult TransformCStyleCastExpr(CStyleCastExpr *E) {
+    Expr::EvalResult Eval;
+    /// EvaluateAsInt is enough because nodes are visited in-order and
+    /// we require the final results be integer. Hence, cases like
+    /// '(int)(float)f' should work.
+    if (!E->EvaluateAsInt(Eval, SemaRef.Context))
+      return BaseTransform::TransformCStyleCastExpr(E);
+    return IntegerLiteral::Create(SemaRef.Context, Eval.Val.getInt(),
+                                  E->getType(), E->getExprLoc());
+  }
+
+  ExprResult TransformParenExpr(ParenExpr *E) {
+    if (auto CF = ConstantFoldOrNull(E))
+      return CF;
+    return BaseTransform::TransformParenExpr(E);
+  }
+
+  ExprResult TransformBinaryOperator(BinaryOperator *E) {
+    VisitedBinOp = E;
+    if (auto CF = ConstantFoldOrNull(E))
+      return CF;
+    return BaseTransform::TransformBinaryOperator(E);
+  }
+
+  /// Add support for UO_Deref in particular to support out parameters.
+  /// e.g., 'void foo(int *__counted_by(len)* out_buf, int len)'
+  ExprResult TransformUnaryOperator(UnaryOperator *E) {
+    if (auto CF = ConstantFoldOrNull(E))
+      return CF;
+
+    Expr *UnwrappedExpr = UnwrapDerefAddrOfPairs(E);
+    E = dyn_cast<UnaryOperator>(UnwrappedExpr);
+    if (!E)
+      return TransformExpr(UnwrappedExpr);
+
+    if (E->getOpcode() == UO_Deref && !InDeref) {
+      if (VisitedBinOp)
+        return Fallback(E);
+      SaveAndRestore<bool> InDerefLocal(InDeref, true);
+      Expr *SubExpr = E->getSubExpr()->IgnoreParenCasts();
+      if (auto *DR = dyn_cast<DeclRefExpr>(SubExpr)) {
+        if (!isa<ParmVarDecl>(DR->getDecl()) || ScopeCheck) {
+          SemaRef.Diag(E->getExprLoc(),
+                       diag::err_deref_in_bounds_safety_count_non_parm_decl)
+              << getDynamicCountKind();
+          return E;
+        }
+        return BaseTransform::TransformUnaryOperator(E);
+      }
+      return Fallback(E);
+    }
+    if (E->isArithmeticOp())
+      return BaseTransform::TransformUnaryOperator(E);
+
+    return Fallback(E);
+  }
+
+  ExprResult TransformDeclRefExpr(DeclRefExpr *E) {
+    if (auto CF = ConstantFoldOrNull(E))
+      return CF;
+
+    ValueDecl *VD = E->getDecl();
+    bool IsNewVD = Visited.insert(VD).second;
+    if (IsNewVD) {
+      Dependees.push_back(TypeCoupledDeclRefInfo(VD, InDeref));
+    }
+    return E;
+  }
+
+  ExprResult TransformMemberExpr(MemberExpr *E) {
+    if (auto CF = ConstantFoldOrNull(E))
+      return CF;
+
+    const Expr *Base = E->getBase();
+
+    // For structs/classes in C++, referring to a field creates a MemberExpr
+    // instead of DeclRefExpr. To support other parts of bounds-safety logic,
+    // replace the MemberExpr by DeclRefExpr.
+    // TODO: Add support for MemberExpr (rdar://134311605).
+    if (SemaRef.getLangOpts().CPlusPlus &&
+        // The MemberExprs that are allowed in C++ but not in C are those having
+        // `this->` implicitly or explicitly as their bases.
+        (Base->isImplicitCXXThis() ||
+         isa<CXXThisExpr>(Base->IgnoreParenImpCasts()))) {
+      ValueDecl *VD = E->getMemberDecl();
+      bool IsNewVD = Visited.insert(VD).second;
+      if (IsNewVD)
+        Dependees.push_back(TypeCoupledDeclRefInfo(VD, InDeref));
+      Expr *DRE = DeclRefExpr::Create(
+          SemaRef.Context, NestedNameSpecifierLoc{}, SourceLocation{}, VD,
+          false, DeclarationNameInfo{VD->getDeclName(), VD->getLocation()},
+          VD->getType(), VK_LValue);
+      return DRE;
+    }
+
+    if (!IsArray) {
+      SemaRef.Diag(
+          E->getExprLoc(),
+          diag::
+              err_attribute_invalid_argument_expression_for_pointer_bounds_attribute);
+      SemaRef.Diag(E->getOperatorLoc(),
+                   diag::note_bounds_safety_struct_fields_only_in_fam);
+      return ExprError();
+    }
+
+    if (E->isArrow()) {
+      SemaRef.Diag(E->getExprLoc(), diag::error_bounds_safety_no_arrow_members);
+      return ExprError();
+    }
+
+    // Recursive call adds base decls to Dependees, i.e. for `a.b.c` it adds `a`
+    // and `b`. `c` is added by the call to Dependees.push_back() further down.
+    ExprResult BaseRes = TransformExpr(E->getBase());
+    if (BaseRes.isInvalid())
+      return ExprError();
+
+    if (BaseRes.get()->getType()->isUnionType()) {
+      SemaRef.Diag(E->getExprLoc(),
+                   diag::error_bounds_safety_no_count_in_unions)
+          << BaseRes.get() << BaseRes.get()->getType();
+      return ExprError();
+    }
+
+    ValueDecl *VD = E->getMemberDecl();
+    bool IsNewVD = Visited.insert(VD).second;
+    if (IsNewVD) {
+      Dependees.push_back(
+          TypeCoupledDeclRefInfo(VD, InDeref, /* Member */ true));
+    }
+
+    return E;
+  }
+};
+
+} // end anonymous namespace
 
 QualType Sema::BuildCountAttributedArrayOrPointerType(QualType WrappedTy,
                                                       Expr *CountExpr,
@@ -9966,10 +10232,26 @@ QualType Sema::BuildCountAttributedArrayOrPointerType(QualType WrappedTy,
                                                       bool OrNull) {
   assert(WrappedTy->isIncompleteArrayType() || WrappedTy->isPointerType());
 
+  // Apple wires CountArgChecker into a separate function
+  // (BuildCountAttributedType) only reachable via -fbounds-safety. We gate it
+  // behind -fexperimental-bounds-safety-expressions instead, keeping the
+  // standard path unchanged.
   llvm::SmallVector<TypeCoupledDeclRefInfo, 1> Decls;
-  BuildTypeCoupledDecls(CountExpr, Decls);
-  /// When the resulting expression is invalid, we still create the AST using
-  /// the original count expression for the sake of AST dump.
+  if (getLangOpts().BoundsSafetyExpressions) {
+    ExprResult R =
+        CountArgChecker(*this, Decls, CountInBytes, OrNull,
+                        /*ScopeCheck=*/false, WrappedTy->isArrayType())
+            .TransformExpr(CountExpr);
+    if (!R.isInvalid())
+      CountExpr = R.get();
+    R = DefaultLvalueConversion(CountExpr);
+    if (!R.isInvalid())
+      CountExpr = R.get();
+  } else {
+    // Standard path: only simple DeclRefExpr allowed.
+    auto *CountDecl = cast<DeclRefExpr>(CountExpr)->getDecl();
+    Decls.push_back(TypeCoupledDeclRefInfo(CountDecl, /*IsDref*/ false));
+  }
   return Context.getCountAttributedType(WrappedTy, CountExpr, CountInBytes,
                                         OrNull, Decls);
 }

@@ -10134,7 +10134,10 @@ DeclarationNameInfo ASTRecordReader::readDeclarationNameInfo() {
 }
 
 TypeCoupledDeclRefInfo ASTRecordReader::readTypeCoupledDeclRefInfo() {
-  return TypeCoupledDeclRefInfo(readDeclAs<ValueDecl>(), readBool());
+  auto *D = readDeclAs<ValueDecl>();
+  bool Deref = readBool();
+  bool Member = readBool();
+  return TypeCoupledDeclRefInfo(D, Deref, Member);
 }
 
 SpirvOperand ASTRecordReader::readHLSLSpirvOperand() {

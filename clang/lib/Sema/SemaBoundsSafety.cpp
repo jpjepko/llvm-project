@@ -186,10 +186,22 @@ bool Sema::CheckCountedByAttrOnField(FieldDecl *FD, Expr *E, bool CountInBytes,
 
   auto *DRE = dyn_cast<DeclRefExpr>(E);
   if (!DRE) {
-    Diag(E->getBeginLoc(),
-         diag::err_count_attr_only_support_simple_decl_reference)
-        << Kind << E->getSourceRange();
-    return true;
+    // Apple's non-fbounds-safety path only accepts DeclRefExprs here. Under
+    // -fexperimental-bounds-safety-expression we relax this to allow MemberExpr
+    // chains (e.g., counted_by(s.len)). Detailed validation of the member chain
+    // is done by CountArgChecker.
+    if (getLangOpts().BoundsSafetyExpressions) {
+      const Expr *Base = E;
+      while (auto *ME = dyn_cast<MemberExpr>(Base))
+        Base = ME->getBase()->IgnoreParenImpCasts();
+      DRE = dyn_cast<DeclRefExpr>(const_cast<Expr *>(Base));
+    }
+    if (!DRE) {
+      Diag(E->getBeginLoc(),
+           diag::err_count_attr_only_support_simple_decl_reference)
+          << Kind << E->getSourceRange();
+      return true;
+    }
   }
 
   auto *CountDecl = DRE->getDecl();

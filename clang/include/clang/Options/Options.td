@@ -1965,6 +1965,15 @@ defm bounds_safety : BoolFOption<
   BothFlags<[], [CC1Option],
           " experimental bounds safety extension for C">>;
 
+defm bounds_safety_expressions
+    : BoolFOption<"experimental-bounds-safety-expressions",
+                  LangOpts<"BoundsSafetyExpressions">, DefaultFalse,
+                  PosFlag<SetTrue, [], [CC1Option], "Enable">,
+                  NegFlag<SetFalse, [], [CC1Option], "Disable">,
+                  BothFlags<[], [CC1Option],
+                            " experimental expression support in bounds safety "
+                            "attributes">>;
+
 defm lifetime_safety : BoolFOption<
   "lifetime-safety",
   LangOpts<"EnableLifetimeSafety">, DefaultTrue,

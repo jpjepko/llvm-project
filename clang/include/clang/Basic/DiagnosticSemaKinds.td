@@ -7102,6 +7102,28 @@ def err_count_attr_argument_not_integer : Error<
   "'%select{counted_by|sized_by|counted_by_or_null|sized_by_or_null}0' requires a non-boolean integer type argument">;
 def err_count_attr_only_support_simple_decl_reference : Error<
   "'%select{counted_by|sized_by|counted_by_or_null|sized_by_or_null}0' argument must be a simple declaration reference">;
+def err_bounds_safety_dynamic_count_function_call
+    : Error<"argument of "
+            "'%select{__counted_by|__sized_by|__counted_by_or_null|__sized_by_"
+            "or_null}0' attribute can only reference "
+            "function with 'const' attribute">;
+def err_bounds_safety_dynamic_count_function_call_argument
+    : Error<"argument of function call %0 in "
+            "'%select{__counted_by|__sized_by|__counted_by_or_null|__sized_by_"
+            "or_null}1' attribute is not a constant expression">;
+def err_attribute_invalid_argument_expression_for_pointer_bounds_attribute
+    : Error<"invalid argument expression to bounds attribute">;
+def err_deref_in_bounds_safety_count_non_parm_decl
+    : Error<"dereference operator in "
+            "'%select{__counted_by|__sized_by|__counted_by_or_null|__sized_by_"
+            "or_null|__ended_by}0' is only allowed for function parameters">;
+def note_bounds_safety_struct_fields_only_in_fam
+    : Note<"nested struct member in count parameter only supported for "
+           "flexible array members">;
+def error_bounds_safety_no_arrow_members
+    : Error<"arrow notation not allowed for struct member in count parameter">;
+def error_bounds_safety_no_count_in_unions
+    : Error<"count parameter refers to union %0 of type %1">;
 def err_count_attr_in_union : Error<
   "'%select{counted_by|sized_by|counted_by_or_null|sized_by_or_null}0' cannot be applied to a union member">;
 def err_count_attr_refer_to_union : Error<

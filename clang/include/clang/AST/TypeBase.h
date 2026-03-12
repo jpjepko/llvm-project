@@ -3363,12 +3363,14 @@ public:
 /// arguments of the `counted_by` attribute and the likes.
 class TypeCoupledDeclRefInfo {
 public:
-  using BaseTy = llvm::PointerIntPair<ValueDecl *, 1, unsigned>;
+  using BaseTy = llvm::PointerIntPair<ValueDecl *, 2, unsigned>;
 
 private:
   enum {
     DerefShift = 0,
     DerefMask = 1,
+    MemberShift = 1,
+    MemberMask = 1,
   };
   BaseTy Data;
 
@@ -3376,9 +3378,15 @@ public:
   /// \p D is to a declaration referenced by the argument of attribute. \p Deref
   /// indicates whether \p D is referenced as a dereferenced form, e.g., \p
   /// Deref is true for `*n` in `int *__counted_by(*n)`.
-  TypeCoupledDeclRefInfo(ValueDecl *D = nullptr, bool Deref = false);
+  /// \p Member indicates that \p D is referenced as the member for a struct,
+  /// e.g __counted_by(hdr.len) `hdr`, although a FieldDecl is referred to by
+  /// a DeclRefExpr, while `len` is referred to by a MemberExpr. In this
+  /// example `Member` is false for `hdr` and true for `len`.
+  TypeCoupledDeclRefInfo(ValueDecl *D = nullptr, bool Deref = false,
+                         bool Member = false);
 
   bool isDeref() const;
+  bool isMember() const;
   ValueDecl *getDecl() const;
   unsigned getInt() const;
   void *getOpaqueValue() const;

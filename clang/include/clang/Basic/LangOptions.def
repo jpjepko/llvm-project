@@ -514,6 +514,7 @@ LANGOPT(CheckConstexprFunctionBodies, 1, 1, Benign,
         "be used in a constant expression.")
 
 LANGOPT(BoundsSafety, 1, 0, NotCompatible, "Bounds safety extension for C")
+LANGOPT(BoundsSafetyExpressions, 1, 0, NotCompatible, "Experimental expression support in bounds safety attributes")
 
 LANGOPT(EnableLifetimeSafety, 1, 0, NotCompatible, "Lifetime safety analysis for C++")
 

@@ -156,6 +156,7 @@ public:
   void writeTypeCoupledDeclRefInfo(TypeCoupledDeclRefInfo Info) {
     writeDeclRef(Info.getDecl());
     writeBool(Info.isDeref());
+    writeBool(Info.isMember());
   }
 
   void writeHLSLSpirvOperand(SpirvOperand Op) {

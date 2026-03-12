@@ -4858,7 +4858,16 @@ const FieldDecl *FieldDecl::findCountedByField() const {
   if (!CAT)
     return nullptr;
 
-  const auto *CountDRE = cast<DeclRefExpr>(CAT->getCountExpr());
+  // Return leaf FieldDecl for nested struct case (MemberExpr), which is
+  // produced when -fexperimental-bounds-safety-expressions is enabled.
+  const Expr *CountExpr = CAT->getCountExpr();
+  if (const auto *ME = dyn_cast<MemberExpr>(CountExpr))
+    return dyn_cast<FieldDecl>(ME->getMemberDecl());
+
+  const auto *CountDRE = dyn_cast<DeclRefExpr>(CountExpr);
+  if (!CountDRE)
+    return nullptr;
+
   const auto *CountDecl = CountDRE->getDecl();
   if (const auto *IFD = dyn_cast<IndirectFieldDecl>(CountDecl))
     CountDecl = IFD->getAnonField();
